@@ -3,7 +3,6 @@
 package proxy
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -168,8 +167,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 
 // parseEventStream 解析 AWS Event Stream 二进制格式
 func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
-	reader := bufio.NewReader(body)
-
+	// 不使用 bufio，直接读取避免缓冲延迟
 	var inputTokens, outputTokens int
 	var totalOutputChars int
 	var totalCredits float64
@@ -178,7 +176,7 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 	for {
 		// Prelude: 12 bytes (total_len + headers_len + crc)
 		prelude := make([]byte, 12)
-		_, err := io.ReadFull(reader, prelude)
+		_, err := io.ReadFull(body, prelude)
 		if err == io.EOF {
 			break
 		}
@@ -196,7 +194,7 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 		// 读取剩余部分
 		remaining := totalLength - 12
 		msgBuf := make([]byte, remaining)
-		_, err = io.ReadFull(reader, msgBuf)
+		_, err = io.ReadFull(body, msgBuf)
 		if err != nil {
 			return err
 		}
