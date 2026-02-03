@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  kiro-api-proxy:
+  kiro-go:
     build: .
     ports:
       - "8080:8080"

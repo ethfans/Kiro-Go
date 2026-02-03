@@ -1,4 +1,4 @@
-# Kiro API Proxy
+# Kiro-Go
 
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://go.dev/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat&logo=docker)](https://www.docker.com/)
@@ -24,8 +24,8 @@ Convert Kiro accounts to OpenAI / Anthropic compatible API service.
 ### Docker Compose (Recommended)
 
 ```bash
-git clone https://github.com/Quorinex/kiro-api-proxy.git
-cd kiro-api-proxy
+git clone https://github.com/Quorinex/Kiro-Go.git
+cd Kiro-Go
 
 # Create data directory for persistence
 mkdir -p data
@@ -40,12 +40,12 @@ docker-compose up -d
 mkdir -p /path/to/data
 
 docker run -d \
-  --name kiro-api-proxy \
+  --name kiro-go \
   -p 8080:8080 \
   -e ADMIN_PASSWORD=your_secure_password \
   -v /path/to/data:/app/data \
   --restart unless-stopped \
-  ghcr.io/quorinex/kiro-api-proxy:latest
+  ghcr.io/quorinex/kiro-go:latest
 ```
 
 > 📁 The `/app/data` volume stores `config.json` with accounts and settings. Mount it for data persistence.
@@ -53,10 +53,10 @@ docker run -d \
 ### Build from Source
 
 ```bash
-git clone https://github.com/Quorinex/kiro-api-proxy.git
-cd kiro-api-proxy
-go build -o kiro-api-proxy .
-./kiro-api-proxy
+git clone https://github.com/Quorinex/Kiro-Go.git
+cd Kiro-Go
+go build -o kiro-go .
+./kiro-go
 ```
 
 ## Configuration
@@ -162,7 +162,7 @@ curl http://localhost:8080/v1/chat/completions \
 ## Project Structure
 
 ```
-kiro-api-proxy/
+Kiro-Go/
 ├── main.go              # Entry point
 ├── config/              # Configuration management
 ├── pool/                # Account pool & load balancing
