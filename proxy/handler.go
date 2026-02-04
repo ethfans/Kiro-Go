@@ -206,9 +206,13 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	models := []map[string]interface{}{
 		{"id": "claude-sonnet-4.5", "object": "model", "owned_by": "anthropic"},
+		{"id": "claude-sonnet-4.5-thinking", "object": "model", "owned_by": "anthropic"},
 		{"id": "claude-sonnet-4", "object": "model", "owned_by": "anthropic"},
+		{"id": "claude-sonnet-4-thinking", "object": "model", "owned_by": "anthropic"},
 		{"id": "claude-haiku-4.5", "object": "model", "owned_by": "anthropic"},
+		{"id": "claude-haiku-4.5-thinking", "object": "model", "owned_by": "anthropic"},
 		{"id": "claude-opus-4.5", "object": "model", "owned_by": "anthropic"},
+		{"id": "claude-opus-4.5-thinking", "object": "model", "owned_by": "anthropic"},
 		{"id": "auto", "object": "model", "owned_by": "kiro-api"},
 		{"id": "gpt-4o", "object": "model", "owned_by": "kiro-proxy"},
 		{"id": "gpt-4", "object": "model", "owned_by": "kiro-proxy"},
@@ -318,8 +322,13 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 解析模型和 thinking 模式
+	thinkingCfg := config.GetThinkingConfig()
+	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+	req.Model = actualModel
+
 	// 转换请求
-	kiroPayload := ClaudeToKiro(&req)
+	kiroPayload := ClaudeToKiro(&req, thinking)
 
 	// 流式或非流式
 	if req.Stream {
@@ -341,12 +350,166 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 		return
 	}
 
+	// 获取 thinking 输出格式配置
+	thinkingFormat := config.GetThinkingConfig().ClaudeFormat
+
 	msgID := "msg_" + uuid.New().String()
 	var contentStarted bool
 	var toolUseIndex int
 	var inputTokens, outputTokens int
 	var credits float64
 	var toolUses []KiroToolUse
+
+	// Thinking 标签解析状态
+	var textBuffer string
+	var inThinkingBlock bool
+
+	// 发送文本的辅助函数
+	// thinkingState: 0=普通内容, 1=thinking开始, 2=thinking中间, 3=thinking结束
+	sendText := func(text string, thinkingState int) {
+		// 确保 content_block 已开始
+		if !contentStarted {
+			h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
+				"type":          "content_block_start",
+				"index":         0,
+				"content_block": map[string]string{"type": "text", "text": ""},
+			})
+			contentStarted = true
+		}
+		
+		if thinkingState == 0 {
+			// 普通内容
+			if text == "" {
+				return
+			}
+			h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": 0,
+				"delta": map[string]string{"type": "text_delta", "text": text},
+			})
+		} else {
+			// thinking 内容
+			var outputText string
+			switch thinkingFormat {
+			case "think":
+				switch thinkingState {
+				case 1:
+					outputText = "<think>" + text
+				case 2:
+					outputText = text
+				case 3:
+					outputText = text + "</think>"
+				}
+			case "reasoning_content":
+				// Claude 格式不支持 reasoning_content，直接输出内容
+				outputText = text
+			default: // "thinking"
+				switch thinkingState {
+				case 1:
+					outputText = "<thinking>" + text
+				case 2:
+					outputText = text
+				case 3:
+					outputText = text + "</thinking>"
+				}
+			}
+			if outputText == "" {
+				return
+			}
+			h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": 0,
+				"delta": map[string]string{"type": "text_delta", "text": outputText},
+			})
+		}
+	}
+
+	// 处理文本，解析 <thinking> 标签
+	var thinkingStarted bool
+	
+	processClaudeText := func(text string, isThinking bool, forceFlush bool) {
+		// 如果是 reasoningContentEvent，直接输出
+		if isThinking {
+			if !thinkingStarted {
+				sendText(text, 1)
+				thinkingStarted = true
+			} else {
+				sendText(text, 2)
+			}
+			return
+		}
+
+		textBuffer += text
+
+		for {
+			if !inThinkingBlock {
+				thinkingStart := strings.Index(textBuffer, "<thinking>")
+				if thinkingStart != -1 {
+					if thinkingStart > 0 {
+						sendText(textBuffer[:thinkingStart], 0)
+					}
+					textBuffer = textBuffer[thinkingStart+10:]
+					inThinkingBlock = true
+					thinkingStarted = false
+				} else if forceFlush || len([]rune(textBuffer)) > 50 {
+					// 使用 rune 切片来正确处理 Unicode 字符
+					runes := []rune(textBuffer)
+					safeLen := len(runes)
+					if !forceFlush {
+						safeLen = max(0, len(runes)-15)
+					}
+					if safeLen > 0 {
+						sendText(string(runes[:safeLen]), 0)
+						textBuffer = string(runes[safeLen:])
+					}
+					break
+				} else {
+					break
+				}
+			} else {
+				thinkingEnd := strings.Index(textBuffer, "</thinking>")
+				if thinkingEnd != -1 {
+					content := textBuffer[:thinkingEnd]
+					if !thinkingStarted {
+						sendText(content, 1)
+						sendText("", 3)
+					} else {
+						sendText(content, 3)
+					}
+					textBuffer = textBuffer[thinkingEnd+11:]
+					inThinkingBlock = false
+					thinkingStarted = false
+				} else if forceFlush {
+					if textBuffer != "" {
+						if !thinkingStarted {
+							sendText(textBuffer, 1)
+							sendText("", 3)
+						} else {
+							sendText(textBuffer, 3)
+						}
+						textBuffer = ""
+					}
+					break
+				} else {
+					// 流式输出 thinking 块内的内容
+					runes := []rune(textBuffer)
+					if len(runes) > 20 {
+						safeLen := len(runes) - 15
+						if safeLen > 0 {
+							if !thinkingStarted {
+								sendText(string(runes[:safeLen]), 1)
+								thinkingStarted = true
+							} else {
+								sendText(string(runes[:safeLen]), 2)
+							}
+							textBuffer = string(runes[safeLen:])
+						}
+					}
+					break
+				}
+			}
+		}
+	}
 
 	// 发送 message_start
 	h.sendSSE(w, flusher, "message_start", map[string]interface{}{
@@ -365,27 +528,12 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 			if text == "" {
 				return
 			}
-			// 确保 content_block 已开始
-			if !contentStarted {
-				h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
-					"type":          "content_block_start",
-					"index":         0,
-					"content_block": map[string]string{"type": "text", "text": ""},
-				})
-				contentStarted = true
-			}
-			// 直接转发文本，不缓冲
-			outputText := text
-			if isThinking {
-				outputText = "<thinking>" + text + "</thinking>"
-			}
-			h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
-				"type":  "content_block_delta",
-				"index": 0,
-				"delta": map[string]string{"type": "text_delta", "text": outputText},
-			})
+			processClaudeText(text, isThinking, false)
 		},
 		OnToolUse: func(tu KiroToolUse) {
+			// 先刷新缓冲区
+			processClaudeText("", false, true)
+
 			toolUses = append(toolUses, tu)
 
 			// 关闭文本块
@@ -451,6 +599,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 		return
 	}
 
+	// 刷新剩余缓冲区
+	processClaudeText("", false, true)
+
 	h.recordSuccess(inputTokens, outputTokens, credits)
 	h.pool.RecordSuccess(account.ID)
 	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
@@ -510,6 +661,7 @@ func (h *Handler) recordFailure() {
 // handleClaudeNonStream Claude 非流式响应
 func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string) {
 	var content string
+	var thinkingContent string
 	var toolUses []KiroToolUse
 	var inputTokens, outputTokens int
 	var credits float64
@@ -517,7 +669,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 	callback := &KiroStreamCallback{
 		OnText: func(text string, isThinking bool) {
 			if isThinking {
-				content += "<thinking>" + text + "</thinking>"
+				thinkingContent += text
 			} else {
 				content += text
 			}
@@ -549,7 +701,21 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 	h.pool.RecordSuccess(account.ID)
 	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
-	resp := KiroToClaudeResponse(content, toolUses, inputTokens, outputTokens, model)
+	// 合并 thinking 内容（如果有 reasoningContentEvent 的内容）
+	thinkingFormat := config.GetThinkingConfig().ClaudeFormat
+	finalContent := content
+	if thinkingContent != "" {
+		switch thinkingFormat {
+		case "think":
+			finalContent = "<think>" + thinkingContent + "</think>" + content
+		case "reasoning_content":
+			finalContent = thinkingContent + content // Claude 格式不支持 reasoning_content，直接拼接
+		default: // "thinking"
+			finalContent = "<thinking>" + thinkingContent + "</thinking>" + content
+		}
+	}
+
+	resp := KiroToClaudeResponse(finalContent, toolUses, inputTokens, outputTokens, model)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(resp)
 }
@@ -596,7 +762,12 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	kiroPayload := OpenAIToKiro(&req)
+	// 解析模型和 thinking 模式
+	thinkingCfg := config.GetThinkingConfig()
+	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+	req.Model = actualModel
+
+	kiroPayload := OpenAIToKiro(&req, thinking)
 
 	if req.Stream {
 		h.handleOpenAIStream(w, account, kiroPayload, req.Model)
@@ -617,38 +788,224 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 		return
 	}
 
+	// 获取 thinking 输出格式配置
+	thinkingFormat := config.GetThinkingConfig().OpenAIFormat
+
 	chatID := "chatcmpl-" + uuid.New().String()
 	var toolCalls []ToolCall
 	var toolCallIndex int
 	var inputTokens, outputTokens int
 	var credits float64
 
-	callback := &KiroStreamCallback{
-		OnText: func(text string, isThinking bool) {
-			if text == "" {
+	// Thinking 标签解析状态
+	var textBuffer string
+	var inThinkingBlock bool
+
+	// 发送 chunk 的辅助函数
+	// thinkingState: 0=普通内容, 1=thinking开始, 2=thinking中间, 3=thinking结束
+	sendChunk := func(content string, thinkingState int) {
+		if content == "" && thinkingState == 2 {
+			return
+		}
+		
+		var chunk map[string]interface{}
+		
+		if thinkingState > 0 {
+			// thinking 内容
+			switch thinkingFormat {
+			case "thinking":
+				// 流式输出标签
+				var text string
+				switch thinkingState {
+				case 1: // 开始
+					text = "<thinking>" + content
+				case 2: // 中间
+					text = content
+				case 3: // 结束
+					text = content + "</thinking>"
+				}
+				if text == "" {
+					return
+				}
+				chunk = map[string]interface{}{
+					"id":      chatID,
+					"object":  "chat.completion.chunk",
+					"created": time.Now().Unix(),
+					"model":   model,
+					"choices": []map[string]interface{}{{
+						"index":         0,
+						"delta":         map[string]string{"content": text},
+						"finish_reason": nil,
+					}},
+				}
+			case "think":
+				var text string
+				switch thinkingState {
+				case 1:
+					text = "<think>" + content
+				case 2:
+					text = content
+				case 3:
+					text = content + "</think>"
+				}
+				if text == "" {
+					return
+				}
+				chunk = map[string]interface{}{
+					"id":      chatID,
+					"object":  "chat.completion.chunk",
+					"created": time.Now().Unix(),
+					"model":   model,
+					"choices": []map[string]interface{}{{
+						"index":         0,
+						"delta":         map[string]string{"content": text},
+						"finish_reason": nil,
+					}},
+				}
+			default: // "reasoning_content"
+				if content == "" {
+					return
+				}
+				chunk = map[string]interface{}{
+					"id":      chatID,
+					"object":  "chat.completion.chunk",
+					"created": time.Now().Unix(),
+					"model":   model,
+					"choices": []map[string]interface{}{{
+						"index":         0,
+						"delta":         map[string]string{"reasoning_content": content},
+						"finish_reason": nil,
+					}},
+				}
+			}
+		} else {
+			// 普通内容
+			if content == "" {
 				return
 			}
-			// 直接转发，不缓冲
-			deltaKey := "content"
-			if isThinking {
-				deltaKey = "reasoning_content"
-			}
-			chunk := map[string]interface{}{
+			chunk = map[string]interface{}{
 				"id":      chatID,
 				"object":  "chat.completion.chunk",
 				"created": time.Now().Unix(),
 				"model":   model,
 				"choices": []map[string]interface{}{{
 					"index":         0,
-					"delta":         map[string]string{deltaKey: text},
+					"delta":         map[string]string{"content": content},
 					"finish_reason": nil,
 				}},
 			}
-			data, _ := json.Marshal(chunk)
-			fmt.Fprintf(w, "data: %s\n\n", string(data))
-			flusher.Flush()
+		}
+		data, _ := json.Marshal(chunk)
+		fmt.Fprintf(w, "data: %s\n\n", string(data))
+		flusher.Flush()
+	}
+
+	// 处理文本，解析 <thinking> 标签
+	// thinkingStarted 用于跟踪是否已发送开始标签
+	var thinkingStarted bool
+	
+	processText := func(text string, isThinking bool, forceFlush bool) {
+		// 如果是 reasoningContentEvent，直接输出
+		if isThinking {
+			if !thinkingStarted {
+				sendChunk(text, 1) // 开始
+				thinkingStarted = true
+			} else {
+				sendChunk(text, 2) // 中间
+			}
+			return
+		}
+
+		textBuffer += text
+
+		for {
+			if !inThinkingBlock {
+				// 查找 <thinking> 开始标签
+				thinkingStart := strings.Index(textBuffer, "<thinking>")
+				if thinkingStart != -1 {
+					// 输出 thinking 标签之前的内容
+					if thinkingStart > 0 {
+						sendChunk(textBuffer[:thinkingStart], 0)
+					}
+					textBuffer = textBuffer[thinkingStart+10:] // 移除 <thinking>
+					inThinkingBlock = true
+					thinkingStarted = false // 重置，准备发送新的开始标签
+				} else if forceFlush || len([]rune(textBuffer)) > 50 {
+					// 没有找到标签，安全输出（保留可能的部分标签）
+					runes := []rune(textBuffer)
+					safeLen := len(runes)
+					if !forceFlush {
+						safeLen = max(0, len(runes)-15)
+					}
+					if safeLen > 0 {
+						sendChunk(string(runes[:safeLen]), 0)
+						textBuffer = string(runes[safeLen:])
+					}
+					break
+				} else {
+					break
+				}
+			} else {
+				// 在 thinking 块内，查找 </thinking> 结束标签
+				thinkingEnd := strings.Index(textBuffer, "</thinking>")
+				if thinkingEnd != -1 {
+					// 输出 thinking 内容
+					content := textBuffer[:thinkingEnd]
+					if !thinkingStarted {
+						// 一次性输出完整内容（开始+内容+结束）
+						sendChunk(content, 1) // 开始
+						sendChunk("", 3)      // 结束（空内容，只发结束标签）
+					} else {
+						// 已经开始了，发送剩余内容和结束
+						sendChunk(content, 3) // 结束
+					}
+					textBuffer = textBuffer[thinkingEnd+11:] // 移除 </thinking>
+					inThinkingBlock = false
+					thinkingStarted = false
+				} else if forceFlush {
+					// 强制刷新：输出剩余内容
+					if textBuffer != "" {
+						if !thinkingStarted {
+							sendChunk(textBuffer, 1) // 开始
+							sendChunk("", 3)         // 结束
+						} else {
+							sendChunk(textBuffer, 3) // 结束
+						}
+						textBuffer = ""
+					}
+					break
+				} else {
+					// 流式输出 thinking 块内的内容
+					runes := []rune(textBuffer)
+					if len(runes) > 20 {
+						safeLen := len(runes) - 15 // 保留可能的 </thinking> 部分
+						if safeLen > 0 {
+							if !thinkingStarted {
+								sendChunk(string(runes[:safeLen]), 1) // 开始
+								thinkingStarted = true
+							} else {
+								sendChunk(string(runes[:safeLen]), 2) // 中间
+							}
+							textBuffer = string(runes[safeLen:])
+						}
+					}
+					break
+				}
+			}
+		}
+	}
+
+	callback := &KiroStreamCallback{
+		OnText: func(text string, isThinking bool) {
+			if text == "" {
+				return
+			}
+			processText(text, isThinking, false)
 		},
 		OnToolUse: func(tu KiroToolUse) {
+			// 先刷新缓冲区
+			processText("", false, true)
+
 			args, _ := json.Marshal(tu.Input)
 			tc := ToolCall{ID: tu.ToolUseID, Type: "function"}
 			tc.Function.Name = tu.Name
@@ -700,6 +1057,9 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 		return
 	}
 
+	// 刷新剩余缓冲区
+	processText("", false, true)
+
 	h.recordSuccess(inputTokens, outputTokens, credits)
 	h.pool.RecordSuccess(account.ID)
 	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
@@ -730,6 +1090,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 // handleOpenAINonStream OpenAI 非流式响应
 func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string) {
 	var content string
+	var reasoningContent string
 	var toolUses []KiroToolUse
 	var inputTokens, outputTokens int
 	var credits float64
@@ -737,8 +1098,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 	callback := &KiroStreamCallback{
 		OnText: func(text string, isThinking bool) {
 			if isThinking {
-				// 非流式模式下，thinking 内容可以作为单独字段或忽略
-				// 这里暂时忽略
+				reasoningContent += text
 			} else {
 				content += text
 			}
@@ -761,7 +1121,14 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 	h.pool.RecordSuccess(account.ID)
 	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
-	resp := KiroToOpenAIResponse(content, toolUses, inputTokens, outputTokens, model)
+	// 解析 content 中的 <thinking> 标签
+	finalContent, extractedReasoning := extractThinkingFromContent(content)
+	if extractedReasoning != "" {
+		reasoningContent = extractedReasoning + reasoningContent
+	}
+
+	thinkingFormat := config.GetThinkingConfig().OpenAIFormat
+	resp := KiroToOpenAIResponseWithReasoning(finalContent, reasoningContent, toolUses, inputTokens, outputTokens, model, thinkingFormat)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(resp)
 }
@@ -862,6 +1229,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiResetStats(w, r)
 	case path == "/generate-machine-id" && r.Method == "GET":
 		h.apiGenerateMachineId(w, r)
+	case path == "/thinking" && r.Method == "GET":
+		h.apiGetThinkingConfig(w, r)
+	case path == "/thinking" && r.Method == "POST":
+		h.apiUpdateThinkingConfig(w, r)
 	default:
 		w.WriteHeader(404)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Not Found"})
@@ -1508,4 +1879,49 @@ func (h *Handler) serveAdminPage(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) serveStaticFile(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/admin/")
 	http.ServeFile(w, r, "web/"+path)
+}
+
+// apiGetThinkingConfig 获取 thinking 配置
+func (h *Handler) apiGetThinkingConfig(w http.ResponseWriter, r *http.Request) {
+	cfg := config.GetThinkingConfig()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"suffix":       cfg.Suffix,
+		"openaiFormat": cfg.OpenAIFormat,
+		"claudeFormat": cfg.ClaudeFormat,
+	})
+}
+
+// apiUpdateThinkingConfig 更新 thinking 配置
+func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Suffix       string `json:"suffix"`
+		OpenAIFormat string `json:"openaiFormat"`
+		ClaudeFormat string `json:"claudeFormat"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+
+	// 验证格式
+	validFormats := map[string]bool{"reasoning_content": true, "thinking": true, "think": true}
+	if req.OpenAIFormat != "" && !validFormats[req.OpenAIFormat] {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid openaiFormat, must be: reasoning_content, thinking, or think"})
+		return
+	}
+	if req.ClaudeFormat != "" && !validFormats[req.ClaudeFormat] {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid claudeFormat, must be: reasoning_content, thinking, or think"})
+		return
+	}
+
+	if err := config.UpdateThinkingConfig(req.Suffix, req.OpenAIFormat, req.ClaudeFormat); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }

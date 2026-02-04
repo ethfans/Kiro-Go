@@ -150,6 +150,55 @@ curl http://localhost:8080/v1/chat/completions \
 | `gpt-4o`, `gpt-4` | claude-sonnet-4-20250514 |
 | `gpt-3.5-turbo` | claude-sonnet-4-20250514 |
 
+## 思考模式
+
+在模型名称后添加后缀（默认：`-thinking`）即可启用扩展思考模式。
+
+### 使用方法
+
+```bash
+# OpenAI API 启用思考
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4.5-thinking",
+    "messages": [{"role": "user", "content": "一步步解决：15 * 23"}],
+    "stream": true
+  }'
+
+# Claude API 启用思考
+curl http://localhost:8080/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "claude-sonnet-4.5-thinking",
+    "max_tokens": 4096,
+    "messages": [{"role": "user", "content": "分析这个问题"}]
+  }'
+```
+
+### 配置
+
+在管理面板的 **设置 > Thinking 模式设置** 中配置：
+
+| 设置 | 说明 | 选项 |
+|-----|------|------|
+| **触发后缀** | 启用思考的模型名称后缀 | 默认：`-thinking`（可自定义，如 `-think`、`-sikao`） |
+| **OpenAI 输出格式** | OpenAI API 中思考内容的返回方式 | `reasoning_content`（DeepSeek 兼容）、`<thinking>` 标签、`<think>` 标签 |
+| **Claude 输出格式** | Claude API 中思考内容的返回方式 | `<thinking>` 标签（默认）、`<think>` 标签、纯文本 |
+
+### 输出格式说明
+
+**OpenAI API (`/v1/chat/completions`)**：
+- `reasoning_content` - 思考内容放在单独的 `reasoning_content` 字段（DeepSeek 兼容）
+- `thinking` - 思考内容用 `<thinking>...</thinking>` 标签包裹在 content 中
+- `think` - 思考内容用 `<think>...</think>` 标签包裹在 content 中
+
+**Claude API (`/v1/messages`)**：
+- `thinking` - 思考内容用 `<thinking>...</thinking>` 标签包裹（默认）
+- `think` - 思考内容用 `<think>...</think>` 标签包裹
+- `reasoning_content` - 纯文本输出
+
 ## API 端点
 
 | 端点 | 说明 |

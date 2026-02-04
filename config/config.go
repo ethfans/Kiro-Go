@@ -1,5 +1,13 @@
-// Package config 配置管理模块
-// 负责账号、设置、统计数据的持久化存储
+// Package config provides configuration management for Kiro API Proxy.
+//
+// This package handles persistent storage and retrieval of:
+//   - Account credentials and authentication tokens
+//   - Server settings (port, host, API keys)
+//   - Usage statistics and metrics
+//   - Thinking mode configuration for AI responses
+//
+// All configuration is stored in a JSON file with thread-safe access
+// via read-write mutex protection.
 package config
 
 import (
@@ -10,7 +18,9 @@ import (
 	"sync"
 )
 
-// GenerateMachineId 生成 UUID v4 格式的机器码
+// GenerateMachineId generates a UUID v4 format machine identifier.
+// This ID is used to uniquely identify the proxy instance in Kiro API requests,
+// helping with request tracking and rate limiting on the server side.
 func GenerateMachineId() string {
 	bytes := make([]byte, 16)
 	rand.Read(bytes)
@@ -20,67 +30,74 @@ func GenerateMachineId() string {
 		bytes[0:4], bytes[4:6], bytes[6:8], bytes[8:10], bytes[10:16])
 }
 
-// Account 账号信息
+// Account represents a Kiro API account with authentication credentials and usage statistics.
 type Account struct {
-	// 基本信息
-	ID           string `json:"id"`
-	Email        string `json:"email,omitempty"`
-	UserId       string `json:"userId,omitempty"`
-	Nickname     string `json:"nickname,omitempty"`
-	
-	// 认证信息
-	AccessToken  string `json:"accessToken"`
-	RefreshToken string `json:"refreshToken"`
-	ClientID     string `json:"clientId,omitempty"`
-	ClientSecret string `json:"clientSecret,omitempty"`
-	AuthMethod   string `json:"authMethod"`          // idc | social
-	Provider     string `json:"provider,omitempty"`
-	Region       string `json:"region"`
-	StartUrl     string `json:"startUrl,omitempty"`
-	ExpiresAt    int64  `json:"expiresAt,omitempty"`
-	MachineId    string `json:"machineId,omitempty"` // UUID 格式机器码
-	
-	// 状态
-	Enabled bool `json:"enabled"`
-	
-	// 订阅信息
-	SubscriptionType  string `json:"subscriptionType,omitempty"`  // FREE | PRO | PRO_PLUS | POWER
-	SubscriptionTitle string `json:"subscriptionTitle,omitempty"`
-	DaysRemaining     int    `json:"daysRemaining,omitempty"`
-	
-	// 使用量
-	UsageCurrent  float64 `json:"usageCurrent,omitempty"`
-	UsageLimit    float64 `json:"usageLimit,omitempty"`
-	UsagePercent  float64 `json:"usagePercent,omitempty"`
-	NextResetDate string  `json:"nextResetDate,omitempty"`
-	LastRefresh   int64   `json:"lastRefresh,omitempty"`
-	
-	// 运行时统计
-	RequestCount int     `json:"requestCount,omitempty"`
-	ErrorCount   int     `json:"errorCount,omitempty"`
-	LastUsed     int64   `json:"lastUsed,omitempty"`
-	TotalTokens  int     `json:"totalTokens,omitempty"`
-	TotalCredits float64 `json:"totalCredits,omitempty"`
+	// Basic identification
+	ID       string `json:"id"`                 // Unique account identifier (UUID)
+	Email    string `json:"email,omitempty"`    // User email address
+	UserId   string `json:"userId,omitempty"`   // Kiro user ID
+	Nickname string `json:"nickname,omitempty"` // Display name for admin panel
+
+	// Authentication credentials
+	AccessToken  string `json:"accessToken"`            // OAuth access token for API calls
+	RefreshToken string `json:"refreshToken"`           // OAuth refresh token for token renewal
+	ClientID     string `json:"clientId,omitempty"`     // OIDC client ID (for IdC auth)
+	ClientSecret string `json:"clientSecret,omitempty"` // OIDC client secret (for IdC auth)
+	AuthMethod   string `json:"authMethod"`             // Authentication method: "idc" (AWS IdC) or "social" (GitHub/Google)
+	Provider     string `json:"provider,omitempty"`     // Identity provider name (e.g., "BuilderId", "GitHub")
+	Region       string `json:"region"`                 // AWS region for OIDC endpoints
+	StartUrl     string `json:"startUrl,omitempty"`     // AWS SSO start URL
+	ExpiresAt    int64  `json:"expiresAt,omitempty"`    // Token expiration timestamp (Unix seconds)
+	MachineId    string `json:"machineId,omitempty"`    // UUID machine identifier for request tracking
+
+	// Account status
+	Enabled bool `json:"enabled"` // Whether account is active in the pool
+
+	// Subscription information
+	SubscriptionType  string `json:"subscriptionType,omitempty"`  // Tier: FREE, PRO, PRO_PLUS, or POWER
+	SubscriptionTitle string `json:"subscriptionTitle,omitempty"` // Human-readable subscription name
+	DaysRemaining     int    `json:"daysRemaining,omitempty"`     // Days until subscription expires
+
+	// Usage tracking
+	UsageCurrent  float64 `json:"usageCurrent,omitempty"`  // Current period usage (credits)
+	UsageLimit    float64 `json:"usageLimit,omitempty"`    // Maximum allowed usage per period
+	UsagePercent  float64 `json:"usagePercent,omitempty"`  // Usage percentage (0.0-1.0)
+	NextResetDate string  `json:"nextResetDate,omitempty"` // Date when usage resets (YYYY-MM-DD)
+	LastRefresh   int64   `json:"lastRefresh,omitempty"`   // Last info refresh timestamp
+
+	// Runtime statistics (updated during operation)
+	RequestCount int     `json:"requestCount,omitempty"` // Total requests processed
+	ErrorCount   int     `json:"errorCount,omitempty"`   // Total errors encountered
+	LastUsed     int64   `json:"lastUsed,omitempty"`     // Last request timestamp
+	TotalTokens  int     `json:"totalTokens,omitempty"`  // Cumulative tokens processed
+	TotalCredits float64 `json:"totalCredits,omitempty"` // Cumulative credits consumed
 }
 
-// Config 全局配置
+// Config represents the global application configuration.
 type Config struct {
-	Password      string    `json:"password"`
-	Port          int       `json:"port"`
-	Host          string    `json:"host"`
-	ApiKey        string    `json:"apiKey,omitempty"`
-	RequireApiKey bool      `json:"requireApiKey"`
-	Accounts      []Account `json:"accounts"`
-	
-	// 全局统计
-	TotalRequests   int     `json:"totalRequests,omitempty"`
-	SuccessRequests int     `json:"successRequests,omitempty"`
-	FailedRequests  int     `json:"failedRequests,omitempty"`
-	TotalTokens     int     `json:"totalTokens,omitempty"`
-	TotalCredits    float64 `json:"totalCredits,omitempty"`
+	// Server settings
+	Password      string    `json:"password"`      // Admin panel password
+	Port          int       `json:"port"`          // HTTP server port (default: 8080)
+	Host          string    `json:"host"`          // HTTP server bind address (default: 0.0.0.0)
+	ApiKey        string    `json:"apiKey,omitempty"`        // API key for client authentication
+	RequireApiKey bool      `json:"requireApiKey"` // Whether to enforce API key validation
+	Accounts      []Account `json:"accounts"`      // Registered Kiro accounts
+
+	// Thinking mode configuration for extended reasoning output
+	ThinkingSuffix       string `json:"thinkingSuffix,omitempty"`       // Model suffix to trigger thinking mode (default: "-thinking")
+	OpenAIThinkingFormat string `json:"openaiThinkingFormat,omitempty"` // OpenAI output format: "reasoning_content", "thinking", or "think"
+	ClaudeThinkingFormat string `json:"claudeThinkingFormat,omitempty"` // Claude output format: "reasoning_content", "thinking", or "think"
+
+	// Global statistics (persisted across restarts)
+	TotalRequests   int     `json:"totalRequests,omitempty"`   // Total API requests received
+	SuccessRequests int     `json:"successRequests,omitempty"` // Successful requests count
+	FailedRequests  int     `json:"failedRequests,omitempty"`  // Failed requests count
+	TotalTokens     int     `json:"totalTokens,omitempty"`     // Total tokens processed
+	TotalCredits    float64 `json:"totalCredits,omitempty"`    // Total credits consumed
 }
 
-// AccountInfo 账户信息更新结构
+// AccountInfo contains account metadata retrieved from Kiro API.
+// Used for updating subscription and usage information.
 type AccountInfo struct {
 	Email             string
 	UserId            string
@@ -100,7 +117,8 @@ var (
 	cfgPath string
 )
 
-// Init 初始化配置
+// Init initializes the configuration system with the specified file path.
+// If the file doesn't exist, a default configuration is created.
 func Init(path string) error {
 	cfgPath = path
 	return Load()
@@ -113,7 +131,8 @@ func Load() error {
 	data, err := os.ReadFile(cfgPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// 创建默认配置，Docker 环境默认监听 0.0.0.0
+			// Create default configuration.
+			// Binds to 0.0.0.0 by default for Docker/container compatibility.
 			cfg = &Config{
 				Password:      "changeme",
 				Port:          8080,
@@ -134,7 +153,8 @@ func Load() error {
 	return nil
 }
 
-// Save 保存配置到文件
+// Save persists the current configuration to the JSON file.
+// Uses indented formatting for human readability.
 func Save() error {
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -143,7 +163,8 @@ func Save() error {
 	return os.WriteFile(cfgPath, data, 0600)
 }
 
-// SetPassword 设置密码（用于环境变量覆盖）
+// SetPassword updates the admin password.
+// Primarily used for environment variable override in containerized deployments.
 func SetPassword(password string) {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
@@ -303,7 +324,8 @@ func UpdateAccountStats(id string, requestCount, errorCount, totalTokens int, to
 	return nil
 }
 
-// UpdateAccountInfo 更新账户的订阅和使用量信息
+// UpdateAccountInfo updates an account's subscription and usage information.
+// Called after refreshing account data from Kiro API.
 func UpdateAccountInfo(id string, info AccountInfo) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
@@ -327,4 +349,47 @@ func UpdateAccountInfo(id string, info AccountInfo) error {
 		}
 	}
 	return nil
+}
+
+// ThinkingConfig holds settings for AI thinking/reasoning mode.
+// When enabled, models output their reasoning process alongside the response.
+type ThinkingConfig struct {
+	Suffix       string `json:"suffix"`       // Model name suffix that triggers thinking mode
+	OpenAIFormat string `json:"openaiFormat"` // Output format for OpenAI-compatible responses
+	ClaudeFormat string `json:"claudeFormat"` // Output format for Claude-compatible responses
+}
+
+// GetThinkingConfig 获取 thinking 配置
+func GetThinkingConfig() ThinkingConfig {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	
+	suffix := cfg.ThinkingSuffix
+	if suffix == "" {
+		suffix = "-thinking"
+	}
+	openaiFormat := cfg.OpenAIThinkingFormat
+	if openaiFormat == "" {
+		openaiFormat = "reasoning_content"
+	}
+	claudeFormat := cfg.ClaudeThinkingFormat
+	if claudeFormat == "" {
+		claudeFormat = "thinking"
+	}
+	
+	return ThinkingConfig{
+		Suffix:       suffix,
+		OpenAIFormat: openaiFormat,
+		ClaudeFormat: claudeFormat,
+	}
+}
+
+// UpdateThinkingConfig 更新 thinking 配置
+func UpdateThinkingConfig(suffix, openaiFormat, claudeFormat string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.ThinkingSuffix = suffix
+	cfg.OpenAIThinkingFormat = openaiFormat
+	cfg.ClaudeThinkingFormat = claudeFormat
+	return Save()
 }

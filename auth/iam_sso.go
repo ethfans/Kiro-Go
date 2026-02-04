@@ -158,7 +158,7 @@ func CompleteIamSsoLogin(sessionID, callbackUrl string) (accessToken, refreshTok
 
 func registerOIDCClient(oidcBase, startUrl, redirectUri string) (clientID, clientSecret string, err error) {
 	payload := map[string]interface{}{
-		"clientName":   "Kiro API Proxy",
+		"clientName":   "Kiro",
 		"clientType":   "public",
 		"scopes":       scopes,
 		"grantTypes":   []string{"authorization_code", "refresh_token"},

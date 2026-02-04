@@ -150,6 +150,55 @@ curl http://localhost:8080/v1/chat/completions \
 | `gpt-4o`, `gpt-4` | claude-sonnet-4-20250514 |
 | `gpt-3.5-turbo` | claude-sonnet-4-20250514 |
 
+## Thinking Mode
+
+Enable extended thinking by adding a suffix to the model name (default: `-thinking`).
+
+### Usage
+
+```bash
+# OpenAI API with thinking
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4.5-thinking",
+    "messages": [{"role": "user", "content": "Solve this step by step: 15 * 23"}],
+    "stream": true
+  }'
+
+# Claude API with thinking
+curl http://localhost:8080/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "claude-sonnet-4.5-thinking",
+    "max_tokens": 4096,
+    "messages": [{"role": "user", "content": "Analyze this problem"}]
+  }'
+```
+
+### Configuration
+
+Configure thinking mode in the Admin Panel under **Settings > Thinking Mode Settings**:
+
+| Setting | Description | Options |
+|---------|-------------|---------|
+| **Trigger Suffix** | Model name suffix to enable thinking | Default: `-thinking` (customizable, e.g., `-think`, `-reason`) |
+| **OpenAI Output Format** | How thinking content is returned in OpenAI API | `reasoning_content` (DeepSeek compatible), `<thinking>` tag, `<think>` tag |
+| **Claude Output Format** | How thinking content is returned in Claude API | `<thinking>` tag (default), `<think>` tag, plain text |
+
+### Output Formats
+
+**OpenAI API (`/v1/chat/completions`)**:
+- `reasoning_content` - Thinking in separate `reasoning_content` field (DeepSeek compatible)
+- `thinking` - Thinking wrapped in `<thinking>...</thinking>` tags in content
+- `think` - Thinking wrapped in `<think>...</think>` tags in content
+
+**Claude API (`/v1/messages`)**:
+- `thinking` - Thinking wrapped in `<thinking>...</thinking>` tags (default)
+- `think` - Thinking wrapped in `<think>...</think>` tags
+- `reasoning_content` - Plain text output
+
 ## API Endpoints
 
 | Endpoint | Description |

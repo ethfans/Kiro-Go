@@ -30,18 +30,41 @@ var modelMap = map[string]string{
 	"gpt-3.5-turbo":            "claude-sonnet-4.5",
 }
 
-func MapModel(model string) string {
+// Thinking 模式提示
+const ThinkingModePrompt = `<thinking_mode>enabled</thinking_mode>
+<max_thinking_length>200000</max_thinking_length>`
+
+// ParseModelAndThinking 解析模型名称，返回实际模型和是否启用 thinking
+func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 	lower := strings.ToLower(model)
+	thinking := false
+	
+	// 使用配置的后缀检查
+	suffixLower := strings.ToLower(thinkingSuffix)
+	if strings.HasSuffix(lower, suffixLower) {
+		thinking = true
+		model = model[:len(model)-len(thinkingSuffix)]
+		lower = strings.ToLower(model)
+	}
+	
+	// 映射模型
 	for k, v := range modelMap {
 		if strings.Contains(lower, k) {
-			return v
+			return v, thinking
 		}
 	}
+	
 	// 如果已经是有效的 Kiro 模型，直接返回
 	if strings.HasPrefix(lower, "claude-") {
-		return model
+		return model, thinking
 	}
-	return "claude-sonnet-4.5"
+	
+	return "claude-sonnet-4.5", thinking
+}
+
+func MapModel(model string) string {
+	mapped, _ := ParseModelAndThinking(model, "-thinking")
+	return mapped
 }
 
 // ==================== Claude API 类型 ====================
@@ -106,12 +129,17 @@ type ClaudeUsage struct {
 
 const maxToolDescLen = 10237
 
-func ClaudeToKiro(req *ClaudeRequest) *KiroPayload {
+func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	modelID := MapModel(req.Model)
 	origin := "AI_EDITOR"
 
 	// 提取系统提示
 	systemPrompt := extractSystemPrompt(req.System)
+	
+	// 如果启用 thinking 模式，注入 thinking 提示
+	if thinking {
+		systemPrompt = ThinkingModePrompt + "\n\n" + systemPrompt
+	}
 	
 	// 注入时间戳
 	timestamp := time.Now().Format(time.RFC3339)
@@ -507,7 +535,7 @@ type OpenAIUsage struct {
 
 // ==================== OpenAI -> Kiro 转换 ====================
 
-func OpenAIToKiro(req *OpenAIRequest) *KiroPayload {
+func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	modelID := MapModel(req.Model)
 	origin := "AI_EDITOR"
 
@@ -523,6 +551,11 @@ func OpenAIToKiro(req *OpenAIRequest) *KiroPayload {
 		} else {
 			nonSystemMessages = append(nonSystemMessages, msg)
 		}
+	}
+
+	// 如果启用 thinking 模式，注入 thinking 提示
+	if thinking {
+		systemPrompt = ThinkingModePrompt + "\n\n" + systemPrompt
 	}
 
 	// 注入时间戳
@@ -806,6 +839,92 @@ func KiroToOpenAIResponse(content string, toolUses []KiroToolUse, inputTokens, o
 			PromptTokens:     inputTokens,
 			CompletionTokens: outputTokens,
 			TotalTokens:      inputTokens + outputTokens,
+		},
+	}
+}
+
+// extractThinkingFromContent 从内容中提取 <thinking> 标签内的内容
+func extractThinkingFromContent(content string) (string, string) {
+	var reasoning string
+	result := content
+
+	for {
+		start := strings.Index(result, "<thinking>")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(result[start:], "</thinking>")
+		if end == -1 {
+			break
+		}
+		end += start
+
+		// 提取 thinking 内容
+		thinkingContent := result[start+10 : end]
+		reasoning += thinkingContent
+
+		// 从结果中移除 thinking 标签
+		result = result[:start] + result[end+11:]
+	}
+
+	return strings.TrimSpace(result), reasoning
+}
+
+// KiroToOpenAIResponseWithReasoning 带 reasoning_content 的 OpenAI 响应
+func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUses []KiroToolUse, inputTokens, outputTokens int, model, thinkingFormat string) map[string]interface{} {
+	finishReason := "stop"
+
+	message := map[string]interface{}{
+		"role": "assistant",
+	}
+
+	if len(toolUses) > 0 {
+		message["content"] = nil
+		toolCalls := make([]map[string]interface{}, len(toolUses))
+		for i, tu := range toolUses {
+			args, _ := json.Marshal(tu.Input)
+			toolCalls[i] = map[string]interface{}{
+				"id":   tu.ToolUseID,
+				"type": "function",
+				"function": map[string]string{
+					"name":      tu.Name,
+					"arguments": string(args),
+				},
+			}
+		}
+		message["tool_calls"] = toolCalls
+		finishReason = "tool_calls"
+	} else {
+		// 根据配置格式化 thinking 输出
+		if reasoningContent != "" {
+			switch thinkingFormat {
+			case "thinking":
+				message["content"] = "<thinking>" + reasoningContent + "</thinking>" + content
+			case "think":
+				message["content"] = "<think>" + reasoningContent + "</think>" + content
+			default: // "reasoning_content"
+				message["content"] = content
+				message["reasoning_content"] = reasoningContent
+			}
+		} else {
+			message["content"] = content
+		}
+	}
+
+	return map[string]interface{}{
+		"id":      "chatcmpl-" + uuid.New().String(),
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   model,
+		"choices": []map[string]interface{}{{
+			"index":         0,
+			"message":       message,
+			"finish_reason": finishReason,
+		}},
+		"usage": map[string]int{
+			"prompt_tokens":     inputTokens,
+			"completion_tokens": outputTokens,
+			"total_tokens":      inputTokens + outputTokens,
 		},
 	}
 }

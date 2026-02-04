@@ -1,5 +1,16 @@
-// Kiro API Proxy - 将 Kiro API 转换为 OpenAI/Anthropic 兼容格式
-// 支持多账号池、自动 Token 刷新、流式响应
+// Package main provides the entry point for Kiro API Proxy.
+//
+// Kiro API Proxy is a reverse proxy service that translates Kiro API requests
+// into OpenAI and Anthropic (Claude) compatible formats. Key features include:
+//   - Multi-account pool with round-robin load balancing
+//   - Automatic OAuth token refresh
+//   - Streaming response support for real-time AI interactions
+//   - Admin panel for account and configuration management
+//
+// The service exposes the following endpoints:
+//   - /v1/messages - Claude API compatible endpoint
+//   - /v1/chat/completions - OpenAI API compatible endpoint
+//   - /admin - Web-based administration panel
 package main
 
 import (

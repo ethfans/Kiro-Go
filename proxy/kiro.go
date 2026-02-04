@@ -120,6 +120,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		return err
 	}
 
+	// 预估输入 token（约 3 字符 = 1 token）
+	estimatedInputTokens := max(1, len(body)/3)
+
 	req, err := http.NewRequest("POST", KiroEndpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -160,13 +163,13 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	return parseEventStream(resp.Body, callback)
+	return parseEventStream(resp.Body, callback, estimatedInputTokens)
 }
 
 // ==================== Event Stream 解析 ====================
 
 // parseEventStream 解析 AWS Event Stream 二进制格式
-func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
+func parseEventStream(body io.Reader, callback *KiroStreamCallback, estimatedInputTokens int) error {
 	// 不使用 bufio，直接读取避免缓冲延迟
 	var inputTokens, outputTokens int
 	var totalOutputChars int
@@ -248,6 +251,10 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 	// 估算 token（约 3 字符 = 1 token）
 	if outputTokens == 0 && totalOutputChars > 0 {
 		outputTokens = max(1, totalOutputChars/3)
+	}
+	// 如果 Kiro 没返回 inputTokens，使用预估值
+	if inputTokens == 0 {
+		inputTokens = estimatedInputTokens
 	}
 
 	if callback.OnCredits != nil && totalCredits > 0 {
